@@ -2,23 +2,29 @@
 //  PIPELINE DEVSECOPS - Yoselin-C / -jenkins-devsecops-Pipeline
 //  Universidad Mariano Gálvez de Guatemala - Sede Cobán
 //  Proyecto de Graduación I - Ingeniería en Sistemas
+//
+//  App objetivo: OWASP Juice Shop (app vulnerable para pruebas)
+//  Flujo: Checkout → Setup → Package Management → Build →
+//         Unit Tests → SAST → DAST → Security Summary
 // ================================================================
 
 pipeline {
 
     agent any
 
-    environment {
-        APP_NAME   = "devsecops-demo-app"
-        APP_PORT   = "5000"
-        REPORT_DIR = "reports"
-        IMAGE_TAG  = "${APP_NAME}:${BUILD_NUMBER}"
-    }
-
     options {
         timestamps()
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 45, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    environment {
+        APP_NAME   = "juice-shop"
+        APP_PORT   = "3000"
+        APP_REPO   = "https://github.com/juice-shop/juice-shop.git"
+        APP_BRANCH = "master"
+        REPORT_DIR = "reports"
+        IMAGE_TAG  = "${APP_NAME}:${BUILD_NUMBER}"
     }
 
     stages {
@@ -31,9 +37,10 @@ pipeline {
                 echo '╚══════════════════════════════════════╝'
                 checkout scm
                 sh '''
-                    echo "[+] Repositorio clonado exitosamente"
+                    echo "[+] Jenkinsfile cargado desde el repositorio"
                     echo "[*] Commit: $(git rev-parse --short HEAD)"
                     echo "[*] Autor:  $(git log -1 --pretty=format:'%an <%ae>')"
+                    mkdir -p ${REPORT_DIR}
                     ls -la
                 '''
             }
@@ -46,15 +53,24 @@ pipeline {
                 echo '║  STAGE 2: CONFIGURACIÓN DEL ENTORNO ║'
                 echo '╚══════════════════════════════════════╝'
                 sh '''
-                    echo "[*] Python version: $(python3 --version)"
-                    mkdir -p ${REPORT_DIR}
+                    echo "[*] Verificando herramientas disponibles..."
+                    echo "[*] Git:    $(git --version)"
+                    echo "[*] Node:   $(node --version)"
+                    echo "[*] npm:    $(npm --version)"
+                    echo "[*] Docker: $(docker --version)"
 
-                    # Instalar pip si no existe
-                    python3 -m ensurepip --upgrade 2>/dev/null || true
-                    python3 -m pip install --upgrade pip --break-system-packages --quiet 2>/dev/null || \
-                    python3 -m pip install --upgrade pip --quiet || true
+                    echo "[*] Clonando OWASP Juice Shop..."
+                    if [ -d "juice-shop" ]; then
+                        echo "[*] Directorio ya existe, actualizando..."
+                        cd juice-shop
+                        git pull origin master || true
+                    else
+                        git clone --branch master --single-branch \
+                            https://github.com/juice-shop/juice-shop.git juice-shop
+                    fi
 
-                    echo "[+] Entorno listo"
+                    echo "[+] Juice Shop listo en ./juice-shop"
+                    ls juice-shop/
                 '''
             }
         }
@@ -64,28 +80,38 @@ pipeline {
             steps {
                 echo '╔══════════════════════════════════════╗'
                 echo '║  STAGE 3: MANEJO DE PAQUETES        ║'
+                echo '║  Herramienta: npm audit (SCA)        ║'
                 echo '╚══════════════════════════════════════╝'
                 sh '''
-                    echo "[*] Instalando dependencias..."
-                    pip install -r requirements.txt --break-system-packages --quiet 2>/dev/null || \
-                    pip install -r requirements.txt --quiet || \
-                    python3 -m pip install -r requirements.txt --break-system-packages --quiet
+                    cd juice-shop
 
+                    echo "[*] Instalando dependencias con npm..."
+                    npm install --legacy-peer-deps 2>&1 | tail -5
+
+                    echo ""
                     echo "[*] Paquetes instalados:"
-                    pip list --format=columns 2>/dev/null || python3 -m pip list --format=columns
+                    npm list --depth=0 2>/dev/null | head -20 || true
 
-                    echo "[*] Auditando vulnerabilidades con pip-audit..."
-                    pip install pip-audit --break-system-packages --quiet 2>/dev/null || \
-                    python3 -m pip install pip-audit --break-system-packages --quiet || true
+                    echo ""
+                    echo "[*] Auditando vulnerabilidades en dependencias (npm audit)..."
 
-                    python3 -m pip_audit -r requirements.txt \
-                        --progress-spinner off \
-                        -f json \
-                        -o ${REPORT_DIR}/packages-audit.json 2>&1 || true
+                    # Reporte JSON
+                    npm audit --json 2>/dev/null \
+                        > ../${REPORT_DIR}/packages-audit.json || true
 
-                    python3 -m pip_audit -r requirements.txt \
-                        --progress-spinner off 2>&1 | tee ${REPORT_DIR}/packages-audit.txt || true
+                    # Reporte texto
+                    {
+                        echo "=============================="
+                        echo " NPM AUDIT - OWASP Juice Shop"
+                        echo " Fecha: $(date)"
+                        echo "=============================="
+                        npm audit 2>&1 || true
+                    } > ../${REPORT_DIR}/packages-audit.txt
 
+                    echo ""
+                    echo "═══ RESUMEN VULNERABILIDADES EN PAQUETES ═══"
+                    npm audit 2>&1 | tail -10 || true
+                    echo "════════════════════════════════════════════"
                     echo "[+] Auditoría de paquetes completada"
                 '''
             }
@@ -104,13 +130,15 @@ pipeline {
                 echo '║  STAGE 4: BUILD DE LA APLICACIÓN    ║'
                 echo '╚══════════════════════════════════════╝'
                 sh '''
-                    echo "[*] Verificando sintaxis Python..."
-                    python3 -m py_compile app.py
-                    echo "[+] Sintaxis OK"
+                    echo "[*] Construyendo imagen Docker de Juice Shop..."
+                    cd juice-shop
 
-                    echo "[*] Construyendo imagen Docker: ${IMAGE_TAG}..."
-                    docker build -t ${IMAGE_TAG} .
-                    echo "[+] Imagen construida: ${IMAGE_TAG}"
+                    docker build \
+                        --tag ${IMAGE_TAG} \
+                        --tag ${APP_NAME}:latest \
+                        . 2>&1
+
+                    echo "[+] Imagen construida exitosamente"
                     docker images | grep ${APP_NAME}
                 '''
             }
@@ -123,18 +151,23 @@ pipeline {
                 echo '║  STAGE 5: PRUEBAS UNITARIAS         ║'
                 echo '╚══════════════════════════════════════╝'
                 sh '''
-                    pytest test_app.py \
-                        -v \
-                        --tb=short \
-                        --junitxml=${REPORT_DIR}/test-results.xml \
-                        --cov-report=xml:${REPORT_DIR}/coverage.xml || true
+                    cd juice-shop
 
-                    echo "[+] Pruebas completadas"
+                    echo "[*] Ejecutando pruebas unitarias de Juice Shop..."
+
+                    # Juice Shop tiene sus propios tests con jest
+                    npm test -- --testPathPattern="server.test" \
+                        --forceExit \
+                        --reporters=default \
+                        2>&1 | tee ../${REPORT_DIR}/test-output.txt || true
+
+                    echo "[+] Pruebas completadas - ver test-output.txt"
                 '''
             }
             post {
                 always {
-                    junit allowEmptyResults: true, testResults: "${REPORT_DIR}/test-results.xml"
+                    archiveArtifacts artifacts: "${REPORT_DIR}/test-output.txt",
+                                     allowEmptyArchive: true
                 }
             }
         }
@@ -144,40 +177,42 @@ pipeline {
             steps {
                 echo '╔══════════════════════════════════════╗'
                 echo '║  STAGE 6: SAST - ANÁLISIS ESTÁTICO  ║'
-                echo '║  Herramienta: Bandit                 ║'
+                echo '║  Herramienta: Semgrep                ║'
                 echo '╚══════════════════════════════════════╝'
                 sh '''
-                    echo "[*] Ejecutando Bandit sobre el código fuente..."
+                    echo "[*] Ejecutando análisis estático con Semgrep..."
 
-                    bandit -r . \
-                        --exclude ./.git,./reports \
-                        -f json \
-                        -o ${REPORT_DIR}/sast-report.json \
-                        -ll --exit-zero 2>&1 || true
+                    # Semgrep corre como contenedor Docker - no necesita instalación
+                    docker run --rm \
+                        -v "$(pwd)/juice-shop:/src" \
+                        -v "$(pwd)/${REPORT_DIR}:/reports" \
+                        returntocorp/semgrep:latest \
+                        semgrep scan \
+                            --config=p/javascript \
+                            --config=p/nodejs \
+                            --config=p/owasp-top-ten \
+                            --json \
+                            --output=/reports/sast-report.json \
+                            --no-git-ignore \
+                            /src 2>&1 | tail -20 || true
 
-                    bandit -r . \
-                        --exclude ./.git,./reports \
-                        -f html \
-                        -o ${REPORT_DIR}/sast-report.html \
-                        -ll --exit-zero 2>&1 || true
+                    # Reporte texto para consola
+                    docker run --rm \
+                        -v "$(pwd)/juice-shop:/src" \
+                        returntocorp/semgrep:latest \
+                        semgrep scan \
+                            --config=p/javascript \
+                            --config=p/nodejs \
+                            --no-git-ignore \
+                            /src 2>&1 | tee ${REPORT_DIR}/sast-report.txt || true
 
-                    echo ""
-                    echo "═══════ RESUMEN SAST ═══════"
-                    bandit -r . --exclude ./.git,./reports -ll --exit-zero 2>&1 || true
-                    echo "════════════════════════════"
-                    echo "[+] SAST completado"
+                    echo "[+] SAST completado - ver sast-report.json"
                 '''
             }
             post {
                 always {
                     archiveArtifacts artifacts: "${REPORT_DIR}/sast-report.*",
                                      allowEmptyArchive: true
-                    publishHTML(target: [
-                        allowMissing: true,
-                        reportDir:    "${REPORT_DIR}",
-                        reportFiles:  'sast-report.html',
-                        reportName:   'SAST Report (Bandit)'
-                    ])
                 }
             }
         }
@@ -190,29 +225,29 @@ pipeline {
                 echo '║  Herramienta: OWASP ZAP              ║'
                 echo '╚══════════════════════════════════════╝'
                 sh '''
-                    echo "[*] Levantando aplicación para escaneo DAST..."
+                    echo "[*] Levantando Juice Shop para escaneo DAST..."
                     docker stop ${APP_NAME}-dast 2>/dev/null || true
                     docker rm   ${APP_NAME}-dast 2>/dev/null || true
 
                     docker run -d \
                         --name ${APP_NAME}-dast \
-                        -p ${APP_PORT}:5000 \
+                        -p ${APP_PORT}:3000 \
                         ${IMAGE_TAG}
 
-                    echo "[*] Esperando que la app responda..."
+                    echo "[*] Esperando que Juice Shop responda..."
                     READY=false
-                    for i in $(seq 1 15); do
-                        if curl -sf http://localhost:${APP_PORT}/health > /dev/null 2>&1; then
-                            echo "[+] App disponible en http://localhost:${APP_PORT}"
+                    for i in $(seq 1 20); do
+                        if curl -sf http://localhost:${APP_PORT}/ > /dev/null 2>&1; then
+                            echo "[+] Juice Shop disponible en http://localhost:${APP_PORT}"
                             READY=true
                             break
                         fi
-                        echo "    Intento $i/15..."
-                        sleep 3
+                        echo "    Intento $i/20..."
+                        sleep 5
                     done
 
                     if [ "$READY" = "false" ]; then
-                        echo "[-] App no respondio - revisando logs..."
+                        echo "[!] App no respondio - revisando logs..."
                         docker logs ${APP_NAME}-dast || true
                         echo "[!] Continuando pipeline sin DAST"
                     else
@@ -229,7 +264,8 @@ pipeline {
                             -r dast-report.html \
                             -J dast-report.json \
                             -l WARN \
-                            --auto 2>&1 | tee ${REPORT_DIR}/dast-output.log || true
+                            -I \
+                            2>&1 | tee ${REPORT_DIR}/dast-output.log || true
 
                         echo "[+] DAST completado"
                     fi
@@ -238,6 +274,7 @@ pipeline {
             post {
                 always {
                     sh '''
+                        echo "[*] Deteniendo Juice Shop..."
                         docker stop ${APP_NAME}-dast 2>/dev/null || true
                         docker rm   ${APP_NAME}-dast 2>/dev/null || true
                     '''
@@ -261,19 +298,21 @@ pipeline {
                 echo '╚══════════════════════════════════════╝'
                 sh '''
                     echo ""
-                    echo "╔══════════════════════════════════════════════════════════╗"
-                    echo "║           RESUMEN PIPELINE DEVSECOPS                    ║"
-                    echo "╠══════════════════════════════════════════════════════════╣"
-                    echo "║  [OK] Checkout completado                               ║"
-                    echo "║  [OK] Entorno configurado                               ║"
-                    echo "║  [OK] Paquetes instalados y auditados (pip-audit)       ║"
-                    echo "║  [OK] Build Docker exitoso                              ║"
-                    echo "║  [OK] Pruebas unitarias (pytest)                        ║"
-                    echo "║  [OK] SAST completado (Bandit)                          ║"
-                    echo "║  [OK] DAST completado (OWASP ZAP)                       ║"
-                    echo "╠══════════════════════════════════════════════════════════╣"
-                    echo "║  Reportes en: reports/                                  ║"
-                    echo "╚══════════════════════════════════════════════════════════╝"
+                    echo "╔══════════════════════════════════════════════════════╗"
+                    echo "║          RESUMEN PIPELINE DEVSECOPS                 ║"
+                    echo "║    App: OWASP Juice Shop  |  Build #${BUILD_NUMBER} ║"
+                    echo "╠══════════════════════════════════════════════════════╣"
+                    echo "║  [OK] Checkout completado                           ║"
+                    echo "║  [OK] Entorno configurado (Node + npm)              ║"
+                    echo "║  [OK] Paquetes auditados (npm audit - SCA)          ║"
+                    echo "║  [OK] Build Docker exitoso                          ║"
+                    echo "║  [OK] Pruebas unitarias (Jest)                      ║"
+                    echo "║  [OK] SAST completado (Semgrep)                     ║"
+                    echo "║  [OK] DAST completado (OWASP ZAP)                   ║"
+                    echo "╠══════════════════════════════════════════════════════╣"
+                    echo "║  Reportes disponibles en: reports/                  ║"
+                    echo "╚══════════════════════════════════════════════════════╝"
+                    echo ""
                     ls -lh ${REPORT_DIR}/ 2>/dev/null || echo "Sin reportes aun"
                 '''
             }
@@ -283,10 +322,12 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: "${REPORT_DIR}/**", allowEmptyArchive: true
+            archiveArtifacts artifacts: "${REPORT_DIR}/**",
+                             allowEmptyArchive: true
             sh '''
                 docker rmi ${IMAGE_TAG} 2>/dev/null || true
-                echo "[+] Limpieza completada"
+                docker rmi ${APP_NAME}:latest 2>/dev/null || true
+                echo "[+] Limpieza de imagenes completada"
             '''
         }
         success {
