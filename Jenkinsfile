@@ -8,7 +8,8 @@ pipeline {
     }
 
     environment {
-        APP_NAME     = 'jenkins-todo-app'
+        APP_NAME     = 'juice-shop'
+        IMAGE_TAG    = 'bkimminich/juice-shop:latest' // Imagen oficial de Juice Shop
         APP_PORT     = '3001'
         MAX_CRITICAL = '0'
         MAX_HIGH     = '3'
@@ -21,118 +22,37 @@ pipeline {
             steps {
                 echo '🔍 Verificando entorno...'
                 sh '''
-                    echo "── Node:   $(node --version)"
-                    echo "── npm:    $(npm --version)"
                     echo "── Docker: $(docker --version)"
-                    echo "── Python: $(python3 --version)"
                 '''
             }
         }
 
-        stage('Checkout') {
+        stage('Checkout & Setup') {
             steps {
-                echo '📥 Descargando código desde GitHub...'
+                echo '📥 Inicializando espacio de trabajo...'
                 checkout scm
                 sh "mkdir -p ${REPORT_DIR}"
             }
         }
 
-        stage('Build') {
+        stage('Docker Pull & Deploy') {
             steps {
-                echo '🔧 Instalando dependencias...'
-                sh 'npm install'
-            }
-        }
-
-        stage('SCA - Dependencias') {
-            steps {
-                echo '📦 Analizando vulnerabilidades en dependencias...'
-                sh """
-                    npm audit --json 2>/dev/null > ${REPORT_DIR}/sca-report.json || true
-                """
-                script {
-                    def auditJson = readFile("${REPORT_DIR}/sca-report.json")
-                    def audit    = new groovy.json.JsonSlurper().parseText(auditJson)
-                    def vulns    = audit.metadata?.vulnerabilities ?: [:]
-                    def critical = vulns.critical ?: 0
-                    def high     = vulns.high ?: 0
-                    def moderate = vulns.moderate ?: 0
-                    def low      = vulns.low ?: 0
-                    def total    = vulns.total ?: 0
-
-                    echo """
-┌─────────────────────────────────┐
-│   SCA — VULNERABILIDADES        │
-├─────────────────────────────────┤
-│  CRITICAL:  ${critical.toString().padLeft(4)}               │
-│  HIGH:      ${high.toString().padLeft(4)}               │
-│  MODERATE:  ${moderate.toString().padLeft(4)}               │
-│  LOW:       ${low.toString().padLeft(4)}               │
-│  TOTAL:     ${total.toString().padLeft(4)}               │
-└─────────────────────────────────┘
-                    """.stripIndent()
-
-                    currentBuild.description = "SCA: ${critical} critical, ${high} high"
-                }
-            }
-        }
-
-        stage('Test') {
-            steps {
-                echo '🧪 Ejecutando pruebas automatizadas...'
-                sh 'npm test'
-            }
-        }
-
-        stage('SAST - Semgrep') {
-            steps {
-                echo '🔒 Analizando vulnerabilidades en el código fuente...'
-                sh """
-                    pip install semgrep --quiet --break-system-packages || true
-                    export PATH=\$HOME/.local/bin:\$PATH
-                    \$HOME/.local/bin/semgrep --config=p/nodejs-security \\
-                            --json \\
-                            --output=${REPORT_DIR}/semgrep-report.json \\
-                            src/ || true
-                    cat ${REPORT_DIR}/semgrep-report.json || echo "Sin reporte generado"
-                """
-                script {
-                    def semgrepFile = "${REPORT_DIR}/semgrep-report.json"
-                    if (fileExists(semgrepFile)) {
-                        def semgrepJson = readFile(semgrepFile)
-                        def semgrep  = new groovy.json.JsonSlurper().parseText(semgrepJson)
-                        def findings = semgrep.results?.size() ?: 0
-
-                        echo """
-┌─────────────────────────────────┐
-│   SAST — SEMGREP                │
-├─────────────────────────────────┤
-│  Hallazgos: ${findings.toString().padLeft(4)}               │
-└─────────────────────────────────┘
-                        """.stripIndent()
-
-                        def prevDesc = currentBuild.description ?: ''
-                        currentBuild.description = "${prevDesc} | SAST: ${findings} findings"
-                    }
-                }
-            }
-        }
-
-        stage('Docker Build & Deploy') {
-            steps {
-                echo '🐳 Construyendo imagen Docker...'
-                sh "docker build -t ${APP_NAME}:latest ."
+                echo "🐳 Descargando imagen oficial: ${IMAGE_TAG}..."
+                sh "docker pull ${IMAGE_TAG}"
+                
                 echo '🚀 Desplegando contenedor...'
                 sh "docker stop ${APP_NAME} || true"
                 sh "docker rm ${APP_NAME} || true"
-                sh "docker run -d --name ${APP_NAME} -p ${APP_PORT}:3000 ${APP_NAME}:latest"
-                echo "✅ App corriendo en http://localhost:${APP_PORT}/todos"
+                // Juice Shop expone internamente el puerto 3000
+                sh "docker run -d --name ${APP_NAME} -p ${APP_PORT}:3000 ${IMAGE_TAG}"
+                
+                echo "✅ OWASP Juice Shop corriendo en http://localhost:${APP_PORT}"
             }
         }
 
-        stage('Trivy - Imagen Docker') {
+        stage('Trivy - SCA & Container Scan') {
             steps {
-                echo '🔍 Escaneando imagen Docker con Trivy...'
+                echo '🔍 Escaneando imagen Docker y dependencias con Trivy...'
                 sh """
                     docker run --rm \\
                         -v /var/run/docker.sock:/var/run/docker.sock \\
@@ -142,7 +62,7 @@ pipeline {
                         --output /output/trivy-report.json \\
                         --severity LOW,MEDIUM,HIGH,CRITICAL \\
                         --no-progress \\
-                        ${APP_NAME}:latest || true
+                        ${IMAGE_TAG} || true
                 """
                 script {
                     def trivyFile = "${REPORT_DIR}/trivy-report.json"
@@ -164,7 +84,7 @@ pipeline {
 
                         echo """
 ┌──────────────────────────────────┐
-│   TRIVY — IMAGEN DOCKER          │
+│   TRIVY — VULNERABILIDADES       │
 ├──────────────────────────────────┤
 │  CRITICAL: ${critical.toString().padLeft(4)}                │
 │  HIGH:     ${high.toString().padLeft(4)}                │
@@ -173,8 +93,7 @@ pipeline {
 └──────────────────────────────────┘
                         """.stripIndent()
 
-                        def prevDesc = currentBuild.description ?: ''
-                        currentBuild.description = "${prevDesc} | Trivy: ${critical} crit, ${high} high"
+                        currentBuild.description = "Trivy: ${critical} crit, ${high} high"
                     }
                 }
             }
@@ -274,16 +193,16 @@ pipeline {
         success {
             echo '''
 ╔══════════════════════════════════════════╗
-║  ✅ PIPELINE COMPLETADO                  ║
-║  App desplegada y seguridad verificada.  ║
+║   ✅ PIPELINE COMPLETADO                  ║
+║   Juice Shop desplegado y verificado.    ║
 ╚══════════════════════════════════════════╝
             '''
         }
         failure {
             echo '''
 ╔══════════════════════════════════════════╗
-║  ❌ PIPELINE FALLÓ                       ║
-║  Revisar el stage en rojo.               ║
+║   ❌ PIPELINE FALLÓ                      ║
+║   Revisar el stage en rojo o las vulns.  ║
 ╚══════════════════════════════════════════╝
             '''
         }
