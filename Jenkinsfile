@@ -1,351 +1,296 @@
-// ================================================================
-//  PIPELINE DEVSECOPS - Yoselin-C / -jenkins-devsecops-Pipeline
-//  Universidad Mariano Gálvez de Guatemala - Sede Cobán
-//  Proyecto de Graduación I - Ingeniería en Sistemas
-//
-//  App objetivo: OWASP Juice Shop (app vulnerable para pruebas)
-//  Flujo: Checkout → Setup → Package Management → Build →
-//         Unit Tests → SAST → DAST → Security Summary
-// ================================================================
-
 pipeline {
-
     agent any
 
     options {
+        buildDiscarder(logRotator(numToKeepStr: '5'))
+        timeout(time: 30, unit: 'MINUTES')
         timestamps()
-        timeout(time: 45, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     environment {
-        APP_NAME   = "juice-shop"
-        APP_PORT   = "3000"
-        APP_REPO   = "https://github.com/juice-shop/juice-shop.git"
-        APP_BRANCH = "master"
-        REPORT_DIR = "reports"
-        IMAGE_TAG  = "${APP_NAME}:${BUILD_NUMBER}"
+        APP_NAME     = 'jenkins-todo-app'
+        APP_PORT     = '3001'
+        MAX_CRITICAL = '0'
+        MAX_HIGH     = '3'
+        REPORT_DIR   = 'security-reports'
     }
 
     stages {
 
-        // ── STAGE 1: CHECKOUT ───────────────────────────────────
+        stage('Prerequisites') {
+            steps {
+                echo '🔍 Verificando entorno...'
+                sh '''
+                    echo "── Node:   $(node --version)"
+                    echo "── npm:    $(npm --version)"
+                    echo "── Docker: $(docker --version)"
+                    echo "── Python: $(python3 --version)"
+                '''
+            }
+        }
+
         stage('Checkout') {
             steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 1: CHECKOUT DEL REPOSITORIO  ║'
-                echo '╚══════════════════════════════════════╝'
+                echo '📥 Descargando código desde GitHub...'
                 checkout scm
-                sh '''
-                    echo "[+] Jenkinsfile cargado desde el repositorio"
-                    echo "[*] Commit: $(git rev-parse --short HEAD)"
-                    echo "[*] Autor:  $(git log -1 --pretty=format:'%an <%ae>')"
-                    mkdir -p ${REPORT_DIR}
-                    ls -la
-                '''
+                sh "mkdir -p ${REPORT_DIR}"
             }
         }
 
-        // ── STAGE 2: SETUP ──────────────────────────────────────
-        stage('Setup') {
-            steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 2: CONFIGURACIÓN DEL ENTORNO ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    echo "[*] Verificando herramientas disponibles..."
-                    echo "[*] Git:    $(git --version)"
-                    echo "[*] Node:   $(node --version)"
-                    echo "[*] npm:    $(npm --version)"
-                    echo "[*] Docker: $(docker --version)"
-
-                    echo "[*] Clonando OWASP Juice Shop..."
-                    if [ -d "juice-shop" ]; then
-                        echo "[*] Directorio ya existe, actualizando..."
-                        cd juice-shop
-                        git pull origin master || true
-                    else
-                        git clone --branch master --single-branch \
-                            https://github.com/juice-shop/juice-shop.git juice-shop
-                    fi
-
-                    echo "[+] Juice Shop listo en ./juice-shop"
-                    ls juice-shop/
-                '''
-            }
-        }
-
-        // ── STAGE 3: MANEJO DE PAQUETES ─────────────────────────
-        stage('Package Management') {
-            steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 3: MANEJO DE PAQUETES        ║'
-                echo '║  Herramienta: npm audit (SCA)        ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    cd juice-shop
-
-                    echo "[*] Instalando dependencias con npm..."
-                    npm install --legacy-peer-deps 2>&1 | tail -5
-
-                    echo ""
-                    echo "[*] Paquetes instalados:"
-                    npm list --depth=0 2>/dev/null | head -20 || true
-
-                    echo ""
-                    echo "[*] Auditando vulnerabilidades en dependencias (npm audit)..."
-
-                    # Reporte JSON
-                    npm audit --json 2>/dev/null \
-                        > ../${REPORT_DIR}/packages-audit.json || true
-
-                    # Reporte texto
-                    {
-                        echo "=============================="
-                        echo " NPM AUDIT - OWASP Juice Shop"
-                        echo " Fecha: $(date)"
-                        echo "=============================="
-                        npm audit 2>&1 || true
-                    } > ../${REPORT_DIR}/packages-audit.txt
-
-                    echo ""
-                    echo "═══ RESUMEN VULNERABILIDADES EN PAQUETES ═══"
-                    npm audit 2>&1 | tail -10 || true
-                    echo "════════════════════════════════════════════"
-                    echo "[+] Auditoría de paquetes completada"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: "${REPORT_DIR}/packages-audit.*",
-                                     allowEmptyArchive: true
-                }
-            }
-        }
-
-        // ── STAGE 4: BUILD ──────────────────────────────────────
         stage('Build') {
             steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 4: BUILD DE LA APLICACIÓN    ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    echo "[*] Construyendo imagen Docker de Juice Shop..."
-                    cd juice-shop
-
-                    docker build \
-                        --tag ${IMAGE_TAG} \
-                        --tag ${APP_NAME}:latest \
-                        . 2>&1
-
-                    echo "[+] Imagen construida exitosamente"
-                    docker images | grep ${APP_NAME}
-                '''
+                echo '🔧 Instalando dependencias...'
+                sh 'npm install'
             }
         }
 
-        // ── STAGE 5: UNIT TESTS ─────────────────────────────────
-        stage('Unit Tests') {
+        stage('SCA - Dependencias') {
             steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 5: PRUEBAS UNITARIAS         ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    cd juice-shop
+                echo '📦 Analizando vulnerabilidades en dependencias...'
+                sh """
+                    npm audit --json 2>/dev/null > ${REPORT_DIR}/sca-report.json || true
+                """
+                script {
+                    def auditJson = readFile("${REPORT_DIR}/sca-report.json")
+                    def audit    = new groovy.json.JsonSlurper().parseText(auditJson)
+                    def vulns    = audit.metadata?.vulnerabilities ?: [:]
+                    def critical = vulns.critical ?: 0
+                    def high     = vulns.high ?: 0
+                    def moderate = vulns.moderate ?: 0
+                    def low      = vulns.low ?: 0
+                    def total    = vulns.total ?: 0
 
-                    echo "[*] Ejecutando pruebas unitarias de Juice Shop..."
+                    echo """
+┌─────────────────────────────────┐
+│   SCA — VULNERABILIDADES        │
+├─────────────────────────────────┤
+│  CRITICAL:  ${critical.toString().padLeft(4)}               │
+│  HIGH:      ${high.toString().padLeft(4)}               │
+│  MODERATE:  ${moderate.toString().padLeft(4)}               │
+│  LOW:       ${low.toString().padLeft(4)}               │
+│  TOTAL:     ${total.toString().padLeft(4)}               │
+└─────────────────────────────────┘
+                    """.stripIndent()
 
-                    # Juice Shop tiene sus propios tests con jest
-                    npm test -- --testPathPattern="server.test" \
-                        --forceExit \
-                        --reporters=default \
-                        2>&1 | tee ../${REPORT_DIR}/test-output.txt || true
-
-                    echo "[+] Pruebas completadas - ver test-output.txt"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: "${REPORT_DIR}/test-output.txt",
-                                     allowEmptyArchive: true
+                    currentBuild.description = "SCA: ${critical} critical, ${high} high"
                 }
             }
         }
 
-        // ── STAGE 6: SAST ───────────────────────────────────────
-        stage('SAST - Static Analysis') {
+        stage('Test') {
             steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 6: SAST - ANÁLISIS ESTÁTICO  ║'
-                echo '║  Herramienta: Semgrep                ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    echo "[*] Ejecutando análisis estático con Semgrep..."
-
-                    # Semgrep corre como contenedor Docker - no necesita instalación
-                    docker run --rm \
-                        -v "$(pwd)/juice-shop:/src" \
-                        -v "$(pwd)/${REPORT_DIR}:/reports" \
-                        returntocorp/semgrep:latest \
-                        semgrep scan \
-                            --config=p/javascript \
-                            --config=p/nodejs \
-                            --config=p/owasp-top-ten \
-                            --json \
-                            --output=/reports/sast-report.json \
-                            --no-git-ignore \
-                            /src 2>&1 | tail -20 || true
-
-                    # Reporte texto para consola
-                    docker run --rm \
-                        -v "$(pwd)/juice-shop:/src" \
-                        returntocorp/semgrep:latest \
-                        semgrep scan \
-                            --config=p/javascript \
-                            --config=p/nodejs \
-                            --no-git-ignore \
-                            /src 2>&1 | tee ${REPORT_DIR}/sast-report.txt || true
-
-                    echo "[+] SAST completado - ver sast-report.json"
-                '''
+                echo '🧪 Ejecutando pruebas automatizadas...'
+                sh 'npm test'
             }
-            post {
-                always {
-                    archiveArtifacts artifacts: "${REPORT_DIR}/sast-report.*",
-                                     allowEmptyArchive: true
+        }
+
+        stage('SAST - Semgrep') {
+            steps {
+                echo '🔒 Analizando vulnerabilidades en el código fuente...'
+                sh """
+                    pip install semgrep --quiet --break-system-packages || true
+                    export PATH=\$HOME/.local/bin:\$PATH
+                    \$HOME/.local/bin/semgrep --config=p/nodejs-security \\
+                            --json \\
+                            --output=${REPORT_DIR}/semgrep-report.json \\
+                            src/ || true
+                    cat ${REPORT_DIR}/semgrep-report.json || echo "Sin reporte generado"
+                """
+                script {
+                    def semgrepFile = "${REPORT_DIR}/semgrep-report.json"
+                    if (fileExists(semgrepFile)) {
+                        def semgrepJson = readFile(semgrepFile)
+                        def semgrep  = new groovy.json.JsonSlurper().parseText(semgrepJson)
+                        def findings = semgrep.results?.size() ?: 0
+
+                        echo """
+┌─────────────────────────────────┐
+│   SAST — SEMGREP                │
+├─────────────────────────────────┤
+│  Hallazgos: ${findings.toString().padLeft(4)}               │
+└─────────────────────────────────┘
+                        """.stripIndent()
+
+                        def prevDesc = currentBuild.description ?: ''
+                        currentBuild.description = "${prevDesc} | SAST: ${findings} findings"
+                    }
                 }
             }
         }
 
-        // ── STAGE 7: DAST ───────────────────────────────────────
-        stage('DAST - Dynamic Analysis') {
+        stage('Docker Build & Deploy') {
             steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 7: DAST - ANÁLISIS DINÁMICO  ║'
-                echo '║  Herramienta: OWASP ZAP              ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    echo "[*] Levantando Juice Shop para escaneo DAST..."
-                    docker stop ${APP_NAME}-dast 2>/dev/null || true
-                    docker rm   ${APP_NAME}-dast 2>/dev/null || true
-
-                    docker run -d \
-                        --name ${APP_NAME}-dast \
-                        -p ${APP_PORT}:3000 \
-                        ${IMAGE_TAG}
-
-                    echo "[*] Esperando que Juice Shop responda..."
-                    READY=false
-                    for i in $(seq 1 20); do
-                        if curl -sf http://localhost:${APP_PORT}/ > /dev/null 2>&1; then
-                            echo "[+] Juice Shop disponible en http://localhost:${APP_PORT}"
-                            READY=true
-                            break
-                        fi
-                        echo "    Intento $i/20..."
-                        sleep 5
-                    done
-
-                    if [ "$READY" = "false" ]; then
-                        echo "[!] App no respondio - revisando logs..."
-                        docker logs ${APP_NAME}-dast || true
-                        echo "[!] Continuando pipeline sin DAST"
-                    else
-                        mkdir -p ${REPORT_DIR}/zap
-                        chmod 777 ${REPORT_DIR}/zap
-
-                        echo "[*] Iniciando OWASP ZAP Baseline Scan..."
-                        docker run --rm \
-                            --network host \
-                            -v "$(pwd)/${REPORT_DIR}/zap:/zap/wrk:rw" \
-                            ghcr.io/zaproxy/zaproxy:stable \
-                            zap-baseline.py \
-                            -t http://localhost:${APP_PORT} \
-                            -r dast-report.html \
-                            -J dast-report.json \
-                            -l WARN \
-                            -I \
-                            2>&1 | tee ${REPORT_DIR}/dast-output.log || true
-
-                        echo "[+] DAST completado"
-                    fi
-                '''
+                echo '🐳 Construyendo imagen Docker...'
+                sh "docker build -t ${APP_NAME}:latest ."
+                echo '🚀 Desplegando contenedor...'
+                sh "docker stop ${APP_NAME} || true"
+                sh "docker rm ${APP_NAME} || true"
+                sh "docker run -d --name ${APP_NAME} -p ${APP_PORT}:3000 ${APP_NAME}:latest"
+                echo "✅ App corriendo en http://localhost:${APP_PORT}/todos"
             }
-            post {
-                always {
-                    sh '''
-                        echo "[*] Deteniendo Juice Shop..."
-                        docker stop ${APP_NAME}-dast 2>/dev/null || true
-                        docker rm   ${APP_NAME}-dast 2>/dev/null || true
-                    '''
-                    archiveArtifacts artifacts: "${REPORT_DIR}/dast-output.log,${REPORT_DIR}/zap/**",
-                                     allowEmptyArchive: true
-                    publishHTML(target: [
-                        allowMissing: true,
-                        reportDir:    "${REPORT_DIR}/zap",
-                        reportFiles:  'dast-report.html',
-                        reportName:   'DAST Report (OWASP ZAP)'
-                    ])
+        }
+
+        stage('Trivy - Imagen Docker') {
+            steps {
+                echo '🔍 Escaneando imagen Docker con Trivy...'
+                sh """
+                    docker run --rm \\
+                        -v /var/run/docker.sock:/var/run/docker.sock \\
+                        -v \$(pwd)/${REPORT_DIR}:/output \\
+                        aquasec/trivy:latest image \\
+                        --format json \\
+                        --output /output/trivy-report.json \\
+                        --severity LOW,MEDIUM,HIGH,CRITICAL \\
+                        --no-progress \\
+                        ${APP_NAME}:latest || true
+                """
+                script {
+                    def trivyFile = "${REPORT_DIR}/trivy-report.json"
+                    if (fileExists(trivyFile)) {
+                        def trivyJson = readFile(trivyFile)
+                        def trivy = new groovy.json.JsonSlurper().parseText(trivyJson)
+                        int critical = 0, high = 0, medium = 0, low = 0
+
+                        trivy.Results?.each { result ->
+                            result.Vulnerabilities?.each { vuln ->
+                                switch(vuln.Severity) {
+                                    case 'CRITICAL': critical++; break
+                                    case 'HIGH':     high++;     break
+                                    case 'MEDIUM':   medium++;   break
+                                    case 'LOW':      low++;      break
+                                }
+                            }
+                        }
+
+                        echo """
+┌──────────────────────────────────┐
+│   TRIVY — IMAGEN DOCKER          │
+├──────────────────────────────────┤
+│  CRITICAL: ${critical.toString().padLeft(4)}                │
+│  HIGH:     ${high.toString().padLeft(4)}                │
+│  MEDIUM:   ${medium.toString().padLeft(4)}                │
+│  LOW:      ${low.toString().padLeft(4)}                │
+└──────────────────────────────────┘
+                        """.stripIndent()
+
+                        def prevDesc = currentBuild.description ?: ''
+                        currentBuild.description = "${prevDesc} | Trivy: ${critical} crit, ${high} high"
+                    }
                 }
             }
         }
 
-        // ── STAGE 8: RESUMEN ────────────────────────────────────
-        stage('Security Summary') {
+        stage('Security Gate') {
             steps {
-                echo '╔══════════════════════════════════════╗'
-                echo '║  STAGE 8: RESUMEN DE SEGURIDAD      ║'
-                echo '╚══════════════════════════════════════╝'
-                sh '''
-                    echo ""
-                    echo "╔══════════════════════════════════════════════════════╗"
-                    echo "║          RESUMEN PIPELINE DEVSECOPS                 ║"
-                    echo "║    App: OWASP Juice Shop  |  Build #${BUILD_NUMBER} ║"
-                    echo "╠══════════════════════════════════════════════════════╣"
-                    echo "║  [OK] Checkout completado                           ║"
-                    echo "║  [OK] Entorno configurado (Node + npm)              ║"
-                    echo "║  [OK] Paquetes auditados (npm audit - SCA)          ║"
-                    echo "║  [OK] Build Docker exitoso                          ║"
-                    echo "║  [OK] Pruebas unitarias (Jest)                      ║"
-                    echo "║  [OK] SAST completado (Semgrep)                     ║"
-                    echo "║  [OK] DAST completado (OWASP ZAP)                   ║"
-                    echo "╠══════════════════════════════════════════════════════╣"
-                    echo "║  Reportes disponibles en: reports/                  ║"
-                    echo "╚══════════════════════════════════════════════════════╝"
-                    echo ""
-                    ls -lh ${REPORT_DIR}/ 2>/dev/null || echo "Sin reportes aun"
-                '''
+                echo '🚦 Evaluando Security Gate...'
+                script {
+                    def trivyFile = "${REPORT_DIR}/trivy-report.json"
+                    int critical = 0, high = 0
+
+                    if (fileExists(trivyFile)) {
+                        def trivyJson = readFile(trivyFile)
+                        def trivy = new groovy.json.JsonSlurper().parseText(trivyJson)
+                        trivy.Results?.each { result ->
+                            result.Vulnerabilities?.each { vuln ->
+                                if (vuln.Severity == 'CRITICAL') critical++
+                                if (vuln.Severity == 'HIGH')     high++
+                            }
+                        }
+                    }
+
+                    echo """
+┌──────────────────────────────────────────┐
+│   SECURITY GATE                          │
+├──────────────────────────────────────────┤
+│  CRITICAL encontradas: ${critical.toString().padLeft(4)} (máx: ${MAX_CRITICAL})    │
+│  HIGH encontradas:     ${high.toString().padLeft(4)} (máx: ${MAX_HIGH})    │
+└──────────────────────────────────────────┘
+                    """.stripIndent()
+
+                    if (critical > MAX_CRITICAL.toInteger()) {
+                        error("❌ SECURITY GATE FALLÓ: ${critical} CRITICAL (máximo: ${MAX_CRITICAL})")
+                    }
+                    if (high > MAX_HIGH.toInteger()) {
+                        error("❌ SECURITY GATE FALLÓ: ${high} HIGH (máximo: ${MAX_HIGH})")
+                    }
+
+                    echo "✅ SECURITY GATE APROBADO"
+                }
             }
         }
 
-    } // end stages
+        stage('DAST - OWASP ZAP') {
+            steps {
+                echo '🕷️ Ejecutando análisis dinámico con OWASP ZAP...'
+                sh """
+                    docker run --rm \\
+                        --network host \\
+                        -v \$(pwd)/${REPORT_DIR}:/zap/wrk \\
+                        ghcr.io/zaproxy/zaproxy:stable \\
+                        zap-baseline.py \\
+                        -t http://localhost:${APP_PORT} \\
+                        -r zap-report.html \\
+                        -J zap-report.json \\
+                        -I || true
+                    echo "=== REPORTE ZAP GENERADO ==="
+                """
+                script {
+                    def zapFile = "${REPORT_DIR}/zap-report.json"
+                    if (fileExists(zapFile)) {
+                        def zapJson = readFile(zapFile)
+                        def zap = new groovy.json.JsonSlurper().parseText(zapJson)
+                        int high = 0, medium = 0, low = 0
 
-    post {
-        always {
-            archiveArtifacts artifacts: "${REPORT_DIR}/**",
-                             allowEmptyArchive: true
-            sh '''
-                docker rmi ${IMAGE_TAG} 2>/dev/null || true
-                docker rmi ${APP_NAME}:latest 2>/dev/null || true
-                echo "[+] Limpieza de imagenes completada"
-            '''
+                        zap.site?.each { site ->
+                            site.alerts?.each { alert ->
+                                switch(alert.riskcode?.toString()) {
+                                    case '3': high++;   break
+                                    case '2': medium++; break
+                                    case '1': low++;    break
+                                }
+                            }
+                        }
+
+                        echo """
+┌──────────────────────────────────┐
+│   DAST — OWASP ZAP               │
+├──────────────────────────────────┤
+│  HIGH:   ${high.toString().padLeft(4)}                    │
+│  MEDIUM: ${medium.toString().padLeft(4)}                    │
+│  LOW:    ${low.toString().padLeft(4)}                    │
+└──────────────────────────────────┘
+                        """.stripIndent()
+
+                        def prevDesc = currentBuild.description ?: ''
+                        currentBuild.description = "${prevDesc} | ZAP: ${high} high"
+                    }
+                }
+            }
         }
-        success {
-            echo '╔══════════════════════════╗'
-            echo '║  [OK] PIPELINE EXITOSO   ║'
-            echo '╚══════════════════════════╝'
-        }
-        failure {
-            echo '╔══════════════════════════╗'
-            echo '║  [X]  PIPELINE FALLO     ║'
-            echo '╚══════════════════════════╝'
-        }
-        cleanup {
-            sh '''
-                docker stop ${APP_NAME}-dast 2>/dev/null || true
-                docker rm   ${APP_NAME}-dast 2>/dev/null || true
-            '''
-        }
+
     }
 
-} // end pipeline
+    post {
+        success {
+            echo '''
+╔══════════════════════════════════════════╗
+║  ✅ PIPELINE COMPLETADO                  ║
+║  App desplegada y seguridad verificada.  ║
+╚══════════════════════════════════════════╝
+            '''
+        }
+        failure {
+            echo '''
+╔══════════════════════════════════════════╗
+║  ❌ PIPELINE FALLÓ                       ║
+║  Revisar el stage en rojo.               ║
+╚══════════════════════════════════════════╝
+            '''
+        }
+        always {
+            echo '📋 Archivando reportes de seguridad...'
+            archiveArtifacts artifacts: "${REPORT_DIR}/**/*",
+                             allowEmptyArchive: true
+        }
+    }
+}
